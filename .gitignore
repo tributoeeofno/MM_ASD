@@ -1,0 +1,51 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging and test output
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Data and generated artifacts
+data/
+*.wav
+*.flac
+*.mp3
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.joblib
+*.pkl
+
+# Keep requested artifact directories present while ignoring their generated contents
+models/*
+!models/.gitkeep
+results/*
+!results/.gitkeep
+metadata/*
+!metadata/.gitkeep
+configs/*
+!configs/.gitkeep
