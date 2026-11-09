@@ -28,6 +28,7 @@ Thumbs.db
 
 # Data and generated artifacts
 data/
+/dataset/
 *.wav
 *.flac
 *.mp3
