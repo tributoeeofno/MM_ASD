@@ -1,4 +1,7 @@
-﻿# Python
+﻿# External DCASE reference repository
+dcase2023_task2_baseline_ae/
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,6 +9,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.AEvenv/
 
 # Packaging and test output
 build/
