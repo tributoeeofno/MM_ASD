@@ -22,12 +22,14 @@ from tqdm import tqdm
 import shutil
 import fire
 import librosa
-from librosa.core.audio import __audioread_load
+import tempfile #creates temporary WAV files
+import subprocess
 import soundfile as sf
 import warnings
 warnings.simplefilter('ignore')
 
 from utils import get_logger, count_num_of_consecutive_letter
+
 
 
 ### OPTION: Sampling rate of the resulting samples. You can also configure this.
@@ -46,8 +48,9 @@ def process_one(src_pair, src_dirs, rms_pair, dest_file, snr_db):
     sig_dir, noise_dir = src_dirs
     sig_rms, noise_rms = rms_pair
 
-    # sig, sr_sig = librosa.load(sig_dir/src_signal, sr=None)
-    sig, sr_sig = __audioread_load(sig_dir/src_signal, offset=0.0, duration=None, dtype=np.float32)
+    #use user defined helper function to load audio using ffmpeg
+    sig, sr_sig = load_audio_ffmpeg(sig_dir / src_signal)
+
     sig = librosa.to_mono(sig) # for making sure
     sig = librosa.resample(sig, orig_sr=sr_sig, target_sr=FINAL_SR)
 
@@ -58,9 +61,8 @@ def process_one(src_pair, src_dirs, rms_pair, dest_file, snr_db):
     else:
         # Mix sounds
         logger.info(f'{src_signal}|{sig_rms:.4f} + {src_noise}|{noise_rms:.4f} -> {dest_file.name} snr={snr_db}dB')
-
-        # noi, sr_noi = librosa.load(noise_dir/src_noise, sr=None)
-        noi, sr_noi = __audioread_load(noise_dir/src_noise, offset=0.0, duration=None, dtype=np.float32)
+        #user defined helper function to load audio using ffmpeg
+        noi, sr_noi = load_audio_ffmpeg(noise_dir / src_noise)
         noi = librosa.to_mono(noi) # for making sure
         noi = librosa.resample(noi, orig_sr=sr_noi, target_sr=FINAL_SR)
 
@@ -76,8 +78,8 @@ def process_data_requests(src_df, src_root, dest_root, snr_db, df, rows):
     """Processes one request in the recipe."""
 
     # Make a list of tuple of noise file and its rms.
-    rms_car = src_df[src_df.index.str.match('^C.\d+')].rms.mean()
-    rms_train = src_df[src_df.index.str.match('^T.\d+')].rms.mean()
+    rms_car = src_df[src_df.index.str.match(r'^C.\d+')].rms.mean()
+    rms_train = src_df[src_df.index.str.match(r'^T.\d+')].rms.mean()
 
     # Process requests one by one
     rows = ['Folder', 'FileID'] + rows
@@ -87,7 +89,7 @@ def process_data_requests(src_df, src_root, dest_root, snr_db, df, rows):
         mics = eval(mics) # '[1,2,3]' -> list([1,2,3])
         replaceable = ('R' == str(qty)[0]) # replaceable or not
         qty = int(qty[1:]) if 'R' == str(qty)[0] else int(qty)
-        noise = int(noise)
+        noise = int(noise)  if snr_db != 'clean' else None
         machine = str(src_dir).split('/')[0]
 
         # base signal RMS amplitude
@@ -108,12 +110,6 @@ def process_data_requests(src_df, src_root, dest_root, snr_db, df, rows):
         sizes = {k: len(v) for k, v in srcs.items()}
         logger.info(f'Processing {rows[2]}/{qty} {src_dir} {src_id} with samples: {sizes} => {dest_dir}')
 
-        # Find noise files for each mic
-        noises = {k: [v for v in src_df.index.values if f'{machine}_N{noise}_mic{k}' in v] for k in mics}
-        noises = {k: [v[len(machine) + 1:] for v in noises[k]] for k in mics} # fix noise filenames
-        nz_sizes = {k: len(v) for k, v in noises.items()}
-        logger.info(f' with noise samples: {nz_sizes}')
-
         # Check the number of available machine samples
         total_available = sum(sizes.values())
         # YOUR OPTION: Uncomment if you just skip requests that cannot be satisfied.
@@ -121,10 +117,17 @@ def process_data_requests(src_df, src_root, dest_root, snr_db, df, rows):
         #     logger.warning(f'!!!!!!! SKIPPING total_available < qty ({total_available} < {qty})')
         #     qty = total_available ############################
         assert total_available >= qty, f'Samples not enough for satisfy your request, # of samples {total_available} < {qty} for pattern: {ptn}'
+        #look for noise files if snr_db is not 'clean'
+        if snr_db != 'clean':
+            # Find noise files for each mic
+            noises = {k: [v for v in src_df.index.values if f'{machine}_N{noise}_mic{k}' in v] for k in mics}
+            noises = {k: [v[len(machine) + 1:] for v in noises[k]] for k in mics} # fix noise filenames
+            nz_sizes = {k: len(v) for k, v in noises.items()}
+            logger.info(f' with noise samples: {nz_sizes}')
 
-        # Check the number of available noise samples
-        min_num_of_noise = min(list(nz_sizes.values()))
-        assert min_num_of_noise > 0, f'(For some of mic) No noise available for satisfy your request, please check your request "qx_nz".'
+            # Check the number of available noise samples
+            min_num_of_noise = min(list(nz_sizes.values()))
+            assert min_num_of_noise > 0, f'(For some of mic) No noise available for satisfy your request, please check your request "qx_nz".'
 
         # Make a sequential list of mp4 files to use files from each mic equally
         selected_pairs = []
@@ -136,7 +139,10 @@ def process_data_requests(src_df, src_root, dest_root, snr_db, df, rows):
                     continue
                 sig = srcs[k].pop(0)
                 src_df.loc[sig, 'used'] = True
-                selected_pairs.append([sig, np.random.choice(noises[k]), k])
+                if snr_db == 'clean':
+                    selected_pairs.append([sig, None, k])
+                else:
+                    selected_pairs.append([sig, np.random.choice(noises[k]), k])
                 local_count += 1
 
         # Create a destination folder
@@ -155,7 +161,12 @@ def process_data_requests(src_df, src_root, dest_root, snr_db, df, rows):
             cur_max = 0 if len(existings) == 0 else int(existings[-1].name[num_pos:num_pos+num_num])
             # Process one file
             cur_filename = file_ptn.replace(numstr, f'%.0{num_num}d' % (cur_max + 1))
-            process_one(selected_pairs[i], [src_dir, noise_dir], [rms, src_df.loc[f'{machine}_{selected_pairs[i][1]}', 'rms']], dest_dir/cur_filename, snr_db)
+
+            if snr_db == 'clean':
+                noise_rms = 0
+            else:
+                noise_rms = src_df.loc[f'{machine}_{selected_pairs[i][1]}', 'rms']
+            process_one(selected_pairs[i], [src_dir, noise_dir], [rms, noise_rms], dest_dir/cur_filename, snr_db)
             count += 1
     return count
 
@@ -242,7 +253,42 @@ def process_recipe_file(src_folder, dest_folder, recipe_file, snr_db):
 
     logger.info(f'Processed {count} files.')
     return count
+#user defined helper function
+def load_audio_ffmpeg(audio_path):
+    """Decode an audio file using FFmpeg, then load it with Librosa."""
 
+    audio_path = Path(audio_path)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+
+        wav_path = Path(temp_dir) / "decoded.wav"
+
+        command = [
+            "ffmpeg",
+            "-nostdin",
+            "-v", "error",
+            "-y",
+            "-i", str(audio_path),
+            "-map", "0:a:0",
+            "-c:a", "pcm_s16le",
+            str(wav_path)
+        ]
+
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        audio, sr = librosa.load(
+            wav_path,
+            sr=None,
+            mono=False
+        )
+
+    return audio, sr
 
 # main
-fire.Fire(process_recipe_file)
+if __name__ == '__main__':
+    fire.Fire(process_recipe_file)
